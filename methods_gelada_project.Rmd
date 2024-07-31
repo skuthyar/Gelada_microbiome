@@ -1,0 +1,1048 @@
+---
+title: "Methods_gelada_project"
+output:
+  pdf_document: default
+  html_document: default
+date: '2024-02-14'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This R Markdown document describes the 16S rRNA amplicon analyses for analyzing gelada microbiomes. 
+```{r Packages needed}
+# Supplementary Table S1 describes the function of each package. 
+library(vegan)
+library(tidyverse)
+library(dplyr)
+library(data.table)
+library(phyloseq)
+library(microbiome)
+library(GUniFrac)
+library(RColorBrewer)
+library(ape)
+library(Rcpp)
+library(dunn.test)
+library(ggpubr)
+library(readxl)
+library(dabestr)
+library(microViz)
+library(ANCOMBC)
+library(lubridate)
+library(grid)
+library(gridExtra)
+library(DivNet)
+library(breakaway)
+library(cowplot)
+library(Maaslin2)
+library(biomehorizon)
+library(MetaLonDA)
+library(qiime2R)
+```
+
+
+```{r Read in files}
+full_gelada_clean <- readRDS("full_gelada_clean.rds")
+```
+
+Statistical analyses of alpha diversity 
+```{r DivNet and breakaway}
+# We exported  and viewed the ASV table in Excel to determine the "base" ASV, or the most common ASV: 5f71804aa6eb0691c68a33d1811fd654 or Veillonella. 
+
+# Aggregate phyloseq object to bacterial family level using tax_glom
+full_gelada_clean_family <- tax_glom(full_gelada_clean, taxrank="Family")
+# Run DivNet
+divnet_full_gelada_clean_family <- full_gelada_clean_family %>%
+  divnet(formula= ~ Individual_ID, base="5f71804aa6eb0691c68a33d1811fd654", ncores = 8)
+
+metafam <- full_gelada_clean_family %>%
+  sample_data %>%
+  as_tibble %>%
+  mutate("sample_names" = full_gelada_clean_family %>% sample_names )
+
+shannonfam <- metafam %>%
+  dplyr::left_join(divnet_full_gelada_clean_family$shannon %>% summary,
+            by = "sample_names")
+
+# Filter out the one sample that is "Early_Adult" 
+shannonfam_final <- filter(shannonfam, Age_Cat != "Early_Adult")
+
+# Does age (categorical) predict Shannon diversity of gelada samples?
+# Dry season
+shannonfam_final_dry <- subset(shannonfam_final, Season=="Dry")
+Age_cat_dry <- betta(formula = estimate ~ Age_Cat, ses = error,  data = shannonfam_final_dry)
+Age_cat_dry$table
+Age_cat_dry$r_squared_wls
+
+# Wet season
+shannonfam_final_wet <- subset(shannonfam_final, Season=="Wet")
+Age_cat_wet <- betta(formula = estimate ~ Age_Cat, ses = error,  data = shannonfam_final_wet)
+Age_cat_wet$table
+Age_cat_wet$r_squared_wls
+
+```
+
+```{r Estimate richness of both infants and adults through phyloseq}
+# All geladas together at the ASV level
+# Estimate Shannon diversity
+sample_data(full_gelada_clean)$Shannon <- estimate_richness(full_gelada_clean, measure=c("Shannon"))$Shannon
+df1 <- data.frame(sample_data(full_gelada_clean))
+# Estimate richness
+sample_data(full_gelada_clean)$Richness <- estimate_richness(full_gelada_clean, measure=c("Observed"))$Observed
+df2 <- data.frame(sample_data(full_gelada_clean))
+
+# Adults only
+# Filter out infants
+adult_subset <- prune_samples(sample_data(full_gelada_clean)$Age_Cat != "Infant", full_gelada_clean)
+# Estimate Shannon diversity for adults
+shannon_adult <- estimate_richness(adult_subset, measures = "Shannon")
+# Extract the Shannon diversity values
+shannon_adult<- shannon_adult$Shannon
+# Add Shannon diversity as a column in the metadata
+ad_m <- as.data.frame(as_tibble(sample_data(adult_subset)))
+ad_m$shannon_adult <- shannon_adult
+
+# Infants only
+# Filter out adult females
+inf_subset <- prune_samples(sample_data(full_gelada_clean)$Age_Cat != "Adult", full_gelada_clean)
+# Estimate Shannon diversity for infants
+shannon_infant <- estimate_richness(inf_subset, measures = "Shannon")
+# Extract the Shannon diversity values
+shannon_infant<- shannon_infant$Shannon
+# Add Shannon diversity as a column in the metadata
+inf_m <- as.data.frame(as_tibble(sample_data(inf_subset)))
+inf_m$shannon_infant <- shannon_infant
+
+# Filter data for one year and under
+inf_m_filtered <- inf_m %>%
+  filter(AgeYear <= 1)
+```
+
+```{r Test for differences with Kruskal-Wallis}
+# Shapiro-Wilks test to test for normality
+shapiro.test(ad_m$shannon_adult)
+shapiro.test(inf_m_filtered$shannon_infant)
+
+# Kruskal-Wallis test since p-value<0.001 for both cases
+kruskal.test(shannon_adult ~ AgeYear, data = ad_m)
+kruskal.test(shannon_infant ~ AgeCatMonth, data = inf_m_filtered)
+
+# Pairwise group comparison
+dunn.test(ad_m$shannon_adult, ad_m$AgeYear, method = "bonferroni")
+dunn.test(inf_m_filtered$shannon_infant, inf_m_filtered$AgeCatMonth, method = "bonferroni")
+
+```
+
+```{r Alpha diversity visualization}
+# Create Figure 2: Violin plots for visualizing Shannon diversity in infants
+age_cat <- ggplot(inf_m_filtered, aes(x=AgeCatMonth, y=shannon_infant, color = AgeCatMonth)) +
+  scale_color_manual(values=c("#D02424", "#D05D24", "#d09524", "#D0CD24")) +
+  geom_violin() + 
+  geom_jitter(width = 0.2, alpha = 0.5, size = 3) +
+  theme_minimal() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.position = "none") +
+  ylab("Shannon diversity index") +
+  xlab("Age category in months") +
+  theme(axis.line = element_line(color = "black")) +
+   theme(axis.title.x = element_text(face = "bold"),
+        axis.text.x = element_text(face = "bold"),
+        axis.title.y = element_text(face = "bold")) +
+  geom_signif(comparisons = list(c("0-3", "3-6")), color = "gray40", size = 0.7, textsize = 7, test = wilcox.test, y_position = 5.5, map_signif_level=c("***"=0.001)) +
+  geom_signif(comparisons = list(c("0-3", "6-9")), color = "gray40", size = 0.7, textsize = 7, test = wilcox.test, y_position = 5.8, map_signif_level=c("***"=0.001)) +
+  geom_signif(comparisons = list(c("0-3", "9-12")), color = "gray40", size = 0.7, textsize = 7, test = wilcox.test, y_position = 6.1, map_signif_level=c("***"=0.001)) +
+  geom_signif(comparisons = list(c("3-6", "9-12")), color = "gray40", size = 0.7, textsize = 7, test = wilcox.test, y_position = 6.4, map_signif_level=c("*"=0.05)) 
+age_cat
+ggsave("Figure2.png", age_cat, width=20, height=10)
+
+# Create Figure 3: Box plots using diversity estimates from phyloseq
+df1_age <- subset(df1, df1$Age_Cat != "Early_Adult")
+pd = position_jitterdodge(dodge.width = 0.75, jitter.width = 0.3)
+Shannon_age <- ggplot(df1_age, aes(Age_Cat, Shannon, fill = Age_Cat)) + 
+  geom_boxplot(outlier.shape=NA) + geom_point(aes(color=Age_Cat), position=pd, alpha=0.4, size=3) + scale_fill_manual(values=c("#D02424","#D0CD24")) + scale_color_manual(values=c("#D02424","#D0CD24")) + theme_bw() + theme(axis.title.x=element_blank()) + theme(legend.title=element_blank()) + theme(legend.position ="none") + ylab("Shannon Diversity")+theme(text = element_text(size = 25)) + theme(
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank()
+)
+Shannon_age
+
+df2_age <- subset(df2, df2$Age_Cat != "Early_Adult")
+Richness_age <- ggplot(df2_age, aes(Age_Cat, Richness, fill = Age_Cat)) + 
+  geom_boxplot(outlier.shape=NA) + geom_point(aes(color=Age_Cat), position=pd, alpha=0.4, size=3) + scale_fill_manual(values=c("#D02424","#D0CD24")) + scale_color_manual(values=c("#D02424","#D0CD24")) + theme_bw() + theme(axis.title.x=element_blank()) + theme(legend.title=element_blank()) + theme(legend.position ="none") + ylab("Richness")+theme(text = element_text(size = 25)) + theme(
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank()
+)
+Richness_age
+
+Figure3 <- ggarrange(Shannon_age, Richness_age)
+ggsave("Figure3.png", Figure3, width=20, height=10)
+
+# Create Figure 4: Cloud plots for visualizing both Shannon diversity and richness using phyloseq estimates
+median_age1 <- dabestr::dabest(df1, Age_Cat ,Shannon,
+                        idx = c("Adult", "Infant"),
+                        paired = FALSE) %>%
+  median_diff()
+
+plot_age1<-plot(median_age1, palette = c("#D02424","#D0CD24"), color.column = Age_Cat)
+plot_age1
+
+median_age2 <- dabest(df2, Age_Cat ,Richness,
+                     idx = c("Adult", "Infant"),
+                     paired = FALSE) %>%
+  median_diff()
+
+plot_age2<-plot(median_age, palette = c("#D02424","#D0CD24"), color.column = Age_Cat)
+plot_age2
+
+Figure4 <- ggarrange(plot_age1, plot_age2)
+ggsave("Figure4.png", Figure4, width=20, height=10)
+
+# Create Figure 5: forest plot of breakaway regression results
+infant<-c("Infant vs Adult in Dry Season", "Infant vs Adult in Wet Season")
+estimate<-c(-0.2337576, -0.1477579) 
+season<-c("Dry", "Wet")
+se<-c(0.04325141, 0.03574336)
+# took these values from breakaway regression results
+A<-data.frame(infant, season, estimate, se)
+
+colors_geladas <- c("tan", "forestgreen")
+g<-ggplot(data=A, aes(x=infant, y=estimate, ymin= (estimate - (0.96* se)), ymax=(estimate + (0.96* se)))) + geom_pointrange()+ # Makes range for ggplot values based on the data and AES specified in first line
+  geom_hline(yintercept=0, lty=2, size =1) +  # Add a dotted line at x = 0 after flip
+  geom_errorbar(aes(ymin=(estimate - (0.96* se)), ymax=(estimate + (0.96* se))), width=0.5, cex=1)+ # Makes whiskers on the range
+  scale_y_continuous(breaks = seq(-0.4, 0.4, by = 0.05))+
+  coord_flip() + # Flip coordinates (puts labels on y axis)
+  geom_point(shape = 15, size = 10, color = colors_geladas) + xlab("") + ylab("") +
+  theme(axis.text=element_text(size=15), axis.title=element_text(size=15))
+ggsave("Figure5.png", g) 
+
+```
+
+Statistical analyses of beta diversity 
+```{r PERMANOVAs}
+# PERMANOVA of Bray-Curtis distances - Table S1
+full_gelada_clean_family <- tax_glom(full_gelada_clean, taxrank="Family")
+full_gelada_clean_rel <- transform_sample_counts(full_gelada_clean_family, function(x) {x*100/sum(x)}) #relativized 
+set.seed(9)
+Age_Cat <- sample_data(full_gelada_clean_rel)$Age_Cat
+AgeYear <- sample_data(full_gelada_clean_rel)$AgeYear
+Season <- sample_data(full_gelada_clean_rel)$Season
+Rain30 <- sample_data(full_gelada_clean_rel)$Rain30
+Rain30 <- as.numeric(Rain30)
+Sex <- sample_data(full_gelada_clean_rel)$Sex
+
+# Keep individual as random effect to control for repeated measurements
+permanova2 <- adonis2(phyloseq::distance(full_gelada_clean, method="bray") ~ Age_Cat + AgeYear + Season + Rain30 + Sex, strata=sample_data(full_gelada_clean)$Individual_ID, na.action = na.omit)
+permanova2
+
+```
+
+```{r Beta diversity visualizations}
+# Create Figure 6: PCoA of microbial compositional differences by age and season
+brayPS <- ordinate(full_gelada_clean, method = "PCoA")
+
+# Age
+full_gel_clean_age <- prune_samples(sample_data(full_gelada_clean)$Age_Cat != "Early_Adult", full_gelada_clean)
+brayPS_age <- ordinate(full_gel_clean_age, method = "PCoA")
+BC_age <- plot_ordination(full_gel_clean_age, brayPS_age, color="Age_Cat") + geom_point(size = 4) + scale_color_manual(values=c("#D02424","#D0CD24"))  
+BC_age <- BC_age + theme_bw() + theme(legend.title=element_blank()) + theme(legend.position="bottom") +theme(text = element_text(size = 25))  
+BC_age
+
+# Season 
+BC_season <- plot_ordination(full_gelada_clean, brayPS, color="Season") + geom_point(size = 4) + scale_color_manual(values=c("tan","forest green"))  
+BC_season <- BC_season + theme_bw() + theme(legend.title=element_blank()) + theme(legend.position="bottom") +theme(text = element_text(size = 25))  
+BC_season
+
+Figure6 <- ggarrange(BC_age, BC_season)
+ggsave("Figure6.png", Figure6)
+
+# Supplementary Figure X: NMDS of microbial compositional differences by age and season
+# Age
+full_gel_clean_age <- prune_samples(sample_data(full_gelada_clean)$Age_Cat != "Early_Adult", full_gelada_clean)
+brayPS <- ordinate(full_gel_clean_age, method = "NMDS")
+BC_age <- plot_ordination(full_gel_clean_age, brayPS, justDF = TRUE)
+BCPlot_age <- ggplot(data = BC_age, aes(x = NMDS1, y = NMDS2, color = Age_Cat)) +
+  geom_point(size = 4) + scale_color_manual(values=c("#D02424","#D0CD24"))+ theme(axis.text = element_text(size=25))
+BCPlot_age <- BCPlot_age + theme_bw() + theme(legend.title=element_blank()) + theme(legend.position="bottom") 
+BCPlot_age
+
+# Season
+brayPS_season <- ordinate(full_gelada_clean, method = "NMDS")
+BC_season <- plot_ordination(full_gelada_clean, brayPS_season, justDF = TRUE)
+BCPlot_season <- ggplot(data = BC_season, aes(x = NMDS1, y = NMDS2, color = Season)) +
+  geom_point(size = 4) + scale_color_manual(values=c("tan","forest green")) + theme(axis.text = element_text(size=25))
+BCPlot_season <- BCPlot_season + theme_bw() + theme(legend.title=element_blank()) + theme(legend.position="bottom") 
+BCPlot_season
+
+NMDS_supplementary <- ggarrange(BCPlot_age, BCPlot_season)
+ggsave("NMDS_supplementary.png", NMDS_supplementary)
+
+```
+
+```{r Compositional heatmap}
+# Set the prevalence to be 20%
+prev <- 0.2 
+
+# Agglomerate to family level and remove taxa that are less than prevalence value
+full_gelada_clean_family <- full_gelada_clean%>%
+  tax_glom("Family") %>%
+  filter_taxa(., function(x) sum(x > 0) > (prev*length(x)), TRUE)
+
+# Exclude uncultured or unidentified taxa and mitochondria
+psq = subset_taxa(full_gelada_clean_family, Family !="uncultured rumen bacterium"
+                  & Family !="Unassigned Order" & Family !="uncultured Mollicutes bacterium"
+                  & Family !="uncultured Clostridiaceae bacterium"
+                  & Family !="uncultured bacterium"
+                  & Family !="uncultured" & Family !="Unassigned"
+                  & Family !="gut metagenome" & Family !="metagenome" & Family != "uncultured Firmicutes bacterium"
+                  & Family != "uncultured prokaryote" & Family != "uncultured organism" & Family != "unidentified rumen bacterium RF39"
+                  & Family !="Mitochondria")
+
+# Create Figure 7: hierarchical clustering abundance heat map by season
+cols <-c("forestgreen", "tan") 
+names(cols) <- unique(samdat_tbl(psq)$Season)
+
+set.seed(3)
+heat.season <- psq %>%
+  tax_transform("clr", rank = "Family") %>%
+  comp_heatmap(colors = heat_palette(sym = TRUE), name = "CLR",tax_anno = taxAnnotation(
+    Prev. = anno_tax_prev(bar_width = 0.3, size = grid::unit(1, "cm"))
+  ),
+  sample_anno = sampleAnnotation(
+    Season = anno_sample("Season"),
+    col = list(Season = cols), border = FALSE
+  ))
+
+heat.season 
+ggsave("Figure7.png", heat.season)
+
+```
+
+Differential abundance analyses 
+```{r Redundancy analysis of bacterial abundances}
+# RDA (values for Tables S2 & S3)
+full_gelada_clean_family_clr <- microbiome::transform(full_gelada_clean_family, transform = "clr")
+summary(sample_sums(full_gelada_clean_family_clr)) # should look clr-transformed
+
+clr_py <- full_gelada_clean_family_clr
+
+main_vars <- c("Age_Cat", "AgeYear", "Sex", "Season", "Rain30") #"Individual_ID"
+
+clr_py_sub <- subset_samples(clr_py, select = main_vars)
+
+# INPUTS
+# export data for RDAs
+d_clr <- t(as(otu_table(clr_py_sub), "matrix"))
+sdf <- as(sample_data(clr_py_sub), "data.frame")
+
+# MAIN SCRIPT
+# check that sample data matches otu table (order and sample IDs)
+identical(rownames(d_clr), rownames(sdf)) # should be TRUE
+
+var_list <- as.list(sdf) 
+
+# run the RDA
+set.seed(9999)
+rda_tests <- lapply(var_list, 
+                    FUN = function(x) {rda(d_clr ~ x, na.action = "na.omit")}) 
+
+# Test each model using PERMANOVA
+aov_rda <- lapply(rda_tests, FUN = function(x) {anova(x)}) 
+
+# EXTRACT & CLEAN UP OUTPUT
+# p-values as data frame
+p_vals_df <- aov_rda %>% lapply(., function(x) {x["Pr(>F)"]}) %>% 
+  bind_rows(., .id = "Variable") %>% .[!grepl("Residual", row.names(.)),]
+
+# R2 data frame
+r2s_df <- rda_tests %>% lapply(., FUN = function(x) {RsquareAdj(x)$r.squared}) %>% bind_rows(., .id = "column_label")
+r2s_df2 <- as.data.frame(t(r2s_df))
+
+identical(p_vals_df$Variable, row.names(r2s_df2))
+
+# Merge
+p_val_r2 <- data.frame(Variable = p_vals_df$Variable, 
+                       r.squared = r2s_df2$V1, 
+                       p.value = p_vals_df$`Pr(>F)`)
+
+p_val_r2
+aov_rda # The simple way to get pseudo-F values for the table in the ms (Table S2)
+
+## Repeat - a combined model with only the sig. predictors - Table S3
+set.seed(9999)
+rda_tests <- rda(d_clr ~ sdf$Age_Cat + sdf$AgeYear + sdf$Season + sdf$Rain30, na.action = "na.omit") 
+
+summary(rda_tests)
+
+# R2 and p-value
+RsquareAdj(rda_tests)
+anova.cca(rda_tests, step = 1000)
+anova.cca(rda_tests, step = 1000, by = "term") # shows each predictor on it's own
+
+```
+
+```{r MaAsLin2}
+# Clean unknown ASV names from taxonomy 
+tax_table(full_gelada_clean)<-apply(tax_table(full_gelada_clean),2, function(x) (gsub("Unassigned*",NA,x)))
+tax_table(full_gelada_clean)<-apply(tax_table(full_gelada_clean),2, function(x) (gsub("uncultured*",NA, x)))
+tax_table(full_gelada_clean)<-apply(tax_table(full_gelada_clean),2, function(x) (gsub("unidentified*",NA, x)))
+tax_table(full_gelada_clean)<-apply(tax_table(full_gelada_clean),2, function(x) (gsub("gut metagenome",NA, x)))
+tax_table(full_gelada_clean)<-apply(tax_table(full_gelada_clean),2, function(x) (gsub("metagenome",NA, x)))
+tax_table(full_gelada_clean)[,"Family"] [tax_table(full_gelada_clean)[,"Order"] %in% "WCHB1-41" ]<- "RFP12"
+
+# Agglomerate taxonomic levels by family 
+season_aggregated <- tax_glom(full_gelada_clean, "Family")
+
+# Pull data out of phyloseq object
+season_tax <- as.data.frame(tax_table(season_aggregated))
+season_otu <- as.data.frame(otu_table(season_aggregated))
+season_m <- as.data.frame(sample_data(season_aggregated))
+
+# Update ASV rows to reflect appropriate taxonomic names
+f_names <- season_tax$Family  
+
+maaslin_otu <- season_otu %>%
+  mutate(taxa_id = f_names) %>%
+  rownames_to_column(var = "OldRowNames") %>%
+  select(-OldRowNames) %>%
+  column_to_rownames(var = "taxa_id") %>%
+  t()  %>% #transpose data
+  as.data.frame()
+
+# Make row names sample names
+maaslin_m <- season_m
+maaslin_m <- data.frame(maaslin_m)
+
+# Run Maaslin for season 
+Maaslin_fit = Maaslin2(
+    input_data = maaslin_otu, 
+    input_metadata = maaslin_m, 
+    output = "maaslin2_results", 
+    fixed_effects = c("Rain30"),
+    random_effects = c("Individual_ID"))
+```
+
+```{r ANCOM-BC2}
+# Set prevalence to be 20%
+prev <- 0.2
+full_gelada_clean_family <- full_gelada_clean%>%
+  tax_glom("Family") %>%
+  filter_taxa(., function(x) sum(x > 0) > (prev*length(x)), TRUE) # this took it down to 94 taxa
+psq = subset_taxa(full_gelada_clean_family, Family !="uncultured rumen bacterium"
+                  & Family !="Unassigned Order" & Family !="uncultured Mollicutes bacterium"
+                  & Family !="uncultured Clostridiaceae bacterium"
+                  & Family !="uncultured bacterium"
+                  & Family !="uncultured" & Family !="Unassigned"
+                  & Family !="gut metagenome" & Family !="metagenome" & Family != "uncultured Firmicutes bacterium"
+                  & Family != "uncultured prokaryote" & Family != "uncultured organism" & Family != "unidentified rumen bacterium RF39") # this took it down to 57 taxa
+out_season = ancombc(
+  phyloseq = psq, 
+  formula = "Season", 
+  p_adj_method = "fdr", 
+  zero_cut = 0.90, # by default prevalence filter of 10% is applied
+  lib_cut = 0, 
+  group = "Season", 
+  struc_zero = TRUE, 
+  neg_lb = TRUE, 
+  tol = 1e-5, 
+  max_iter = 100, 
+  conserve = TRUE, 
+  alpha = 0.05, 
+  global = TRUE
+)
+
+res = out_season$res
+qval = res$q_val
+tab_lfc = res$beta
+se = res$se
+tab_lfc$ASV <- rownames(tab_lfc)
+col_name = c("Dry.Wet","ASV")
+colnames(tab_lfc) = col_name
+tax <- tax_table(psq)
+tax <- as.data.frame(tax)
+tab_lfc <- merge(tab_lfc, tax, by='row.names')
+tab_lfc <- column_to_rownames(tab_lfc, var = "Row.names")
+tab_lfc <- merge(tab_lfc, se, by="row.names")
+colnames(tab_lfc)[11] = "SE"
+tab_lfc1 <- tab_lfc %>%
+  arrange(desc(Dry.Wet)) %>%
+  dplyr::mutate(direct = ifelse(Dry.Wet > 0, "Positive LFC", "Negative LFC"))
+
+tab_lfc1$direct = factor(tab_lfc1$direct, 
+                           levels = c("Positive LFC", "Negative LFC"))
+tab_lfc1_strict <- subset(tab_lfc1, tab_lfc1$Dry.Wet > 0.5 | tab_lfc1$Dry.Wet < -0.5)
+
+# Create Figure 8 - ANCOM-BC2 plot
+season = ggplot(data = tab_lfc1_strict, 
+                aes(x = Family, y = Dry.Wet, fill = direct, color = direct)) + 
+  geom_bar(stat = "identity", colour=NA, width = 0.7, 
+           position = position_dodge(width = 0.4)) +
+  geom_errorbar(aes(ymin = Dry.Wet - SE, ymax = Dry.Wet + SE), width = 0.2,
+                position = position_dodge(0.05), color = "black") + 
+  labs(x = NULL, y = "Log fold change",
+       title = "Log-fold change of microbial families in wet season compared to dry") + 
+  scale_fill_manual(values=c("#167027","#729679")) + 
+  theme_minimal() + theme(legend.title=element_blank()) + 
+  theme(plot.title = element_text(hjust = 0.5),
+        panel.grid.minor.y = element_blank(),
+        axis.text.x = element_text(angle = 60, hjust = 1)) + theme(text = element_text(size = 18))
+season
+
+ggsave("Figure8.pdf", season, width=20, height=10)
+
+# Create Figure 9 - faceted boxplot of relative abundances of the taxa that were significant in ANCOM-BC2
+psq_rel <- transform_sample_counts(full_gelada_clean_family, function(x) x*100/sum(x)) # relativize the data
+
+psq_rel_ancomfams<- subset_taxa(psq_rel, Family == "Prevotellaceae" |
+                                  Family == "Spirochaetaceae" | Family == "Eggerthellaceae" | Family == "Microbacteriaceae" |
+                                  Family == "Puniceicoccaceae" | Family == "Clostridium sp. CAG:306" | Family == "vadinBE97" |
+                                  Family == "Pirellulaceae" | Family == "Methanobacteriaceae" | Family == "M2PB4-65 termite group"| 
+                                  Family == "Bacteroidales UCG-001" |
+                                  Family == "Succinivibrionaceae") # select the sig. taxa
+
+plot_abundance <- function(x = psq_rel_ancomfams, # phyloseq data
+                           title = "",
+                           Facet = "Family", # taxa rank for facets
+                           Category = "Season", # categorical features for x axis
+                           Color = "Season",
+                           legend = "Season",
+                           LBLs = c("Label 1", "Label 2", 
+                                    "Label 3", "Label 4", "5", "6", "7", "8", "9", "10", "11", "12")
+) {
+  
+  mphyseq <- psmelt(x)
+  mphyseq <- subset(mphyseq, Abundance > 0)
+  
+  ggplot(data = mphyseq, 
+         mapping = aes_string(x = Category,
+                              y = "Abundance",
+                              color = Color, fill = Color)
+  ) +
+    scale_color_manual(name='Season', values=c("tan", "forestgreen"), labels=c('')) +
+    geom_boxplot(fill = NA, outlier.shape=NA) + # avoid double plotting of outliers)
+    geom_point(size = 1, alpha = 0.3, 
+               position = position_jitter(width = 0.2)) +
+    facet_wrap(facets = Facet, ncol = 6) +
+    scale_y_log10(labels = scales::number_format(accuracy = 0.1, decimal.mark = '.'), limits = c(0.001, 100)) +
+    labs(title = title) +
+    theme(legend.position = legend) +
+    theme_bw() +
+    xlab(" ") + ylab("Relative abundance")
+}
+
+p.box <- plot_abundance(psq_rel_ancomfams, Facet="Family")
+ggsave("Figure9.pdf", p.box)
+```
+
+Longitudinal analyses 
+```{r Longitudinal diversity}
+age <- ggplot(inf_m, aes(x=AgeYear, y=shannon_infant)) +
+  geom_point(alpha = .25, color = "#D0CD24", size = 3) +
+  geom_smooth(method = "loess", color = "#D02424") +
+  theme_minimal() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank()) +
+  xlab("Age in years") + 
+  ylab("Shannon diversity index") +
+  theme(axis.title.x = element_text(face = "bold"),
+        axis.title.y = element_text(face = "bold")) +
+  theme(axis.line = element_line(color = "black")) 
+age
+ggsave("Figure10.png", age, width=20, height=10)
+
+```
+
+```{r BiomHorizon}
+# Using a phyloseq object with more timepoints
+season_physeq <- readRDS("season_physeq.rds") #how is this different from phy object we have been using thus far
+# Clean unknown ASV names from taxonomy **using Baniel et al 2021 code
+tax_table(season_physeq)<-apply(tax_table(season_physeq),2, function(x) (gsub("Unassigned*",NA,x)))
+tax_table(season_physeq)<-apply(tax_table(season_physeq),2, function(x) (gsub("uncultured*",NA, x)))
+tax_table(season_physeq)<-apply(tax_table(season_physeq),2, function(x) (gsub("unidentified*",NA, x)))
+tax_table(season_physeq)<-apply(tax_table(season_physeq),2, function(x) (gsub("gut metagenome",NA, x)))
+tax_table(season_physeq)<-apply(tax_table(season_physeq),2, function(x) (gsub("metagenome",NA, x)))
+tax_table(season_physeq)[,"Family"] [tax_table(season_physeq)[,"Order"] %in% "WCHB1-41" ]<- "RFP12"
+
+# Tax glom by family 
+season_aggregated <- tax_glom(season_physeq, "Family")
+
+# Pull data out of physeq object
+season_tax <- as.data.frame(tax_table(season_aggregated))
+season_otu <- as.data.frame(otu_table(season_aggregated))
+season_m <- as.data.frame((sample_data(season_aggregated)))
+
+# Update ASV rows to reflect appropriate taxonomic names
+f_names <- season_tax$Family  
+
+# Plot all families for one individual, F22
+# Prep ASV data
+biom_otu <- season_otu %>%
+  mutate(taxa_id = f_names) %>%
+  select(last_col(), everything())
+
+# Prep metadata
+season_m <- data.frame((sample_data(season_aggregated)))
+season_m$sample <- row.names(season_m) 
+
+biom_m <- season_m %>%
+  mutate(SampleDate = mdy(SampleDate)) %>%
+  rename(subject = ID) %>%
+  rename(collection_date = SampleDate) %>%
+  as.data.frame()
+
+paramList <- prepanel(otudata = biom_otu, metadata = biom_m, subj = "F22")
+
+F22_horizon <- horizonplot(paramList,
+            aesthetics = horizonaes(title = "Microbiome Horizon Plot", 
+            xlabel = "Samples from one wild gelada, F22", 
+            ylabel = "Taxa Phyla", 
+            legendTitle = "Quartiles Relative to Taxon Median"))
+ggsave("FigureS6a.png", age, width=30, height=20)
+
+# Plot one ASV (RFP12) across multiple individuals
+biom2_m <- biom_m %>%
+  filter(subject %in% c("F19","F22")) %>%
+  mutate(subject = as.character(subject)) %>%
+  filter(collection_date == "2017-06-06" | collection_date == "2017-12-01" | collection_date =="2018-04-03" | collection_date == "2018-09-06" | collection_date == "2018-11-12") %>%
+  select(subject, sample, collection_date) %>%
+  arrange(subject, collection_date) %>%
+  as.data.frame()
+
+biom2_otu <- biom_otu %>%
+  select("taxa_id", "LID_102279", "LID_101908", "LID_103279", "LID_102220", "LID_102831", "LID_102185", "LID_101812", "LID_102068", "LID_102031", "LID_102855")
+
+paramList <- prepanel(otudata = biom2_otu, metadata = biom2_m, singleVarOTU = "RFP12")
+
+multi_horizon <- horizonplot(paramList)
+
+ggsave("FigureS6b.png", multi_horizon, width=20, height=10)
+
+```
+
+```{r MetalonDA}
+# Using larger phyloseq object from before
+# Prep ASV data using ASV table from family-level phyloseq object
+metalon_otu <- season_otu %>%
+  mutate(taxa_id = f_names) %>%
+  select(last_col(), everything()) %>%
+  rownames_to_column() %>%
+  select(-rowname) %>%
+  column_to_rownames(var = "taxa_id") 
+
+# Put columns in descending order 
+column_order <- (names(metalon_otu)) 
+metalon_otu2 <- metalon_otu %>%
+  select(all_of(column_order))
+
+# Select needed columns, create a numeric day column, and arrange row names to match ASV table
+metalon_m <- season_m %>%
+  select(c(ID, Sex, SampleDate)) %>%
+  mutate(SampleDate = mdy(SampleDate)) %>%
+  arrange(SampleDate) %>%
+  mutate(day = as.factor(SampleDate)) %>%
+  mutate(day = unclass(day)) %>%
+  select(-SampleDate) %>%
+  arrange(row.names(.)) 
+
+# Check that row names in metadata are identical to column names in ASV table
+identical(rownames(metalon_m), colnames(metalon_otu))
+
+# Create vectors
+group <- metalon_m$Sex
+subject <- metalon_m$ID 
+time <- as.numeric(metalon_m$day)
+
+# Define the prediction timepoints 
+points = seq(1, 300, length.out = 300)
+
+# Run MetalonDA on one family (Helicobacteraceae)
+# Identify significant time intervals between males and females 
+output.metalonda.f1 = metalonda(Count = data.matrix(metalon_otu2)[1,], Time = time, Group = group,
+                                ID = subject, n.perm = 100, points = points,
+                                text = rownames(data.matrix(metalon_otu2))[1],
+                                parall = FALSE, pvalue.threshold = 0.05,
+                                adjust.method = "BH", time.unit = "days", ylabel = "Normalized Count",
+                                col = c("black", "green"), prefix = "metalon_F1")
+
+ggsave("FigureS5.png", output.metalonda.f1)
+
+```
+
+```{r Seasons longitudinal plot}
+# Agglomeration **using Baniel et al 2021 data and code
+ps1 = tax_glom(season_physeq,"Phylum",NArm=FALSE)
+ps2<-psmelt(ps1)
+ps2$Taxa<-ps2$Phylum
+
+ps1 = tax_glom(season_physeq,"Class",NArm=FALSE)
+ps2<-psmelt(ps1)
+ps2$Taxa<-ps2$Class
+  
+ps1 = tax_glom(season_physeq,"Order",NArm=FALSE)
+ps2<-psmelt(ps1)
+ps2$Taxa<-ps2$Order
+  
+ps1 = tax_glom(season_physeq,"Family",NArm=FALSE)
+ps2<-psmelt(ps1)
+ps2$Taxa<-ps2$Family #CHOOSE THIS LEVEL
+  
+ps1 = tax_glom(season_physeq,"Genus",NArm=FALSE)
+ps2<-psmelt(ps1)
+ps2$Taxa<-ps2$Genus
+
+# Write function **using Baniel et al 2021 data and code
+'%!in%'<-function(x,y)!('%in%'(x,y))
+
+# Calculate relative abundance of each taxa across all samples **using Baniel et al 2021 data and code
+ps2$RelativeAbundance<-(as.numeric(as.character(ps2$Abundance))*100)/as.numeric(as.character(ps2$NbReads))
+a1<-sapply(unique(ps2$Taxa),function(x) mean(ps2$RelativeAbundance[ps2$Taxa==x],na.rm=TRUE))
+a2<-data.frame(cbind(Taxa=as.character(unique(ps2$Taxa)),RA=a1))
+a2$RA<-as.numeric(as.character(a2$RA))
+a2[with(a2, order(-RA)), ] 
+
+# Filter taxa>0.01% relative abundance for the models **using Baniel et al 2021 data and code
+ps3<-droplevels(subset(ps2,ps2$Taxa %!in% NA))
+ps3<-droplevels(subset(ps3,ps3$Taxa %in% unique(a2$Taxa[a2$RA>=0.01])))
+length(unique(ps3$Taxa)) # 142 
+length(unique(ps2$Taxa)) # 218
+
+# Read in csv that details which taxa change in abundance during which season - this csv is based on the analyses done in Baniel et al 2021.
+season_microbes <- read.csv("season_microbes.csv")
+
+# Create wet/dry variable for each taxa  
+ps4 <- left_join(ps3, season_microbes, by = "Taxa")
+
+wet_microbes <- season_microbes[season_microbes$Type == 'increase in wet periods',]
+dry_microbes <- season_microbes[season_microbes$Type == 'increase in dry periods',]
+
+# Filter for dates
+ps4 <- ps4 %>%
+  mutate(SampleDate = mdy(SampleDate)) %>%
+  filter(between(SampleDate, as.Date('2017-10-01'), as.Date('2019-01-31'))) 
+
+# dtw dry plot
+dtwd <-droplevels(subset(ps4,ps4$Taxa %in% c("M2PB4-65 termite group", "Bacteroidales UCG-001"))) #0.30 - 0.03
+
+dtw_d <- ggplot(dtwd, aes(x=SampleDate, y=RelativeAbundance+0.001, color = Taxa)) +
+  scale_color_manual(values=c("#5c4424", "#a57a41")) +
+  scale_y_log10() +
+  scale_x_date(limits = as.Date(c("2017-9-01", "2019-01-31"))) +
+  coord_cartesian(ylim = c(0.005, 5.0))+
+    annotate("rect", xmin = as.Date("2017-10-01"), xmax = as.Date("2018-02-01"), ymin = 0.001, ymax = 5.0, 
+             alpha = .15, fill = "#D2B48C") +
+    annotate("rect", xmin = as.Date("2018-02-01"), xmax = as.Date("2018-06-01"), ymin = 0.001, ymax = 5.0, 
+           alpha = .15, fill = "#D2B48C") +
+    annotate("rect", xmin = as.Date("2018-10-01"), xmax = as.Date("2019-01-31"), ymin = 0.001, ymax = 5.0, 
+             alpha = .15, fill = "#D2B48C") +
+  geom_smooth(method="gam",se=F) +
+    theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.text.x=element_blank(),
+        legend.position ="none") +
+  annotate(geom = "text", y= 0.65, x = as.Date("2018-02-08"), label = "M2PB4-65 termite group", fontface = "bold", size = 2.5, color = "#a57a41") +
+  annotate(geom = "text", y= 0.07, x = as.Date("2018-02-01"), label = "Bacteroidales UCG-001", fontface = "bold", size = 2.5, color = "#5c4424")
+
+dtw_d
+
+# gc dry plot
+gcd <-droplevels(subset(ps4,ps4$Taxa %in% c("Pirellulaceae", "Methanobacteriaceae"))) #1.0 - 0.03
+
+gc_d <- ggplot(gcd, aes(x=SampleDate, y=RelativeAbundance+0.001, color = Taxa,  linetype = Taxa)) +
+  scale_color_manual(values=c("#5c4424", "#a57a41")) +
+  scale_linetype_manual(values = c("solid", "dashed")) +
+  scale_y_log10() +
+  scale_x_date(limits = as.Date(c("2017-9-01", "2019-01-31"))) +
+  coord_cartesian(ylim = c(0.005, 5.0))+
+    annotate("rect", xmin = as.Date("2017-10-01"), xmax = as.Date("2018-02-01"), ymin = 0.001, ymax = 5.0, 
+             alpha = .15, fill = "#D2B48C") +
+    annotate("rect", xmin = as.Date("2018-02-01"), xmax = as.Date("2018-06-01"), ymin = 0.001, ymax = 5.0, 
+           alpha = .15, fill = "#D2B48C") +
+    annotate("rect", xmin = as.Date("2018-10-01"), xmax = as.Date("2019-01-31"), ymin = 0.001, ymax = 5.0, 
+             alpha = .15, fill = "#D2B48C") +
+  geom_smooth(method="gam",se=F) +
+    theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.y=element_blank(),
+        axis.text.y=element_blank(),
+        legend.position ="none") +
+  annotate(geom = "text", y= 0.07, x = as.Date("2018-11-30"), label = "Pirellulaceae", fontface = "bold", size = 2.5, color = "#a57a41") +
+  annotate(geom = "text", y= 0.94, x = as.Date("2018-09-15"), label = "Methanobacteriaceae", fontface = "bold", size = 2.5, color =
+             "#5c4424") +
+  annotate(geom = "text", y= 0.75, x = as.Date("2017-11-15"), label = "Predictor", fontface = "bold", size = 2.5, color =
+             "#5c4424") +
+  annotate(geom = "text", y= 0.07, x = as.Date("2017-11-15"), label = "Predicted", fontface = "bold", size = 2.5, color =
+             "#a57a41")
+gc_d
+
+# dtw wet plot
+dtww <-droplevels(subset(ps4,ps4$Taxa %in% c("Prevotellaceae", "Muribaculaceae"))) #0.50 - 0.05
+
+dtw_w <- ggplot(dtww, aes(x=SampleDate, y=RelativeAbundance+0.001, color = Taxa)) +
+  scale_color_manual(values=c("#0f3d0f", "#2db82d")) +
+  scale_y_log10() +
+  scale_x_date(breaks = as.Date(c("2018-01-15", "2018-08-01", "2018-12-23")),
+               limits = as.Date(c("2017-9-01", "2019-01-31")), 
+               labels = c("Dry","Wet", "Dry")) +
+  coord_cartesian(ylim = c(0.005, 5.0))+
+    annotate("rect", xmin = as.Date("2018-06-01"), xmax = as.Date("2018-10-01"), ymin = 0.001, ymax = 5.0, 
+           alpha = .15, fill = "#228B22") +
+  geom_smooth(method="gam",se=F) +
+    theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        legend.position ="none") +
+  annotate(geom = "text", y= 0.60, x = as.Date("2018-02-15"), label = "Muribaculaceae", fontface = "bold", size = 2.5, color = "#0f3d0f") +
+  annotate(geom = "text", y= 0.14, x = as.Date("2018-02-15"), label = "Prevotellaceae", fontface = "bold", size = 2.5, color = "#2db82d")
+
+dtw_w
+
+# gc wet
+gcw <-droplevels(subset(ps4,ps4$Taxa %in% c("Prevotellaceae", "Acidaminococcaceae"))) #3.0 - 0.1 this scale is a problem
+
+gc_w <- ggplot(gcw, aes(x=SampleDate, y=RelativeAbundance+0.001, color = Taxa, linetype = Taxa)) +
+  scale_color_manual(values=c("#0f3d0f", "#228B22")) +
+  scale_linetype_manual(values = c("solid", "dashed")) +
+  scale_y_log10() +
+  scale_x_date(breaks = as.Date(c("2018-01-15", "2018-08-01", "2018-12-23")),
+               limits = as.Date(c("2017-9-01", "2019-01-31")), 
+               labels = c("Dry","Wet", "Dry")) +
+    annotate("rect", xmin = as.Date("2018-06-01"), xmax = as.Date("2018-10-01"), ymin = 0.001, ymax = 5.0, 
+           alpha = .15, fill = "#228B22") +
+  geom_smooth(method="gam",se=F) +
+    theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.ticks.y=element_blank(),
+        axis.text.y=element_blank(),
+        legend.position ="none") +
+  annotate(geom = "text", y= 1.1, x = as.Date("2018-10-05"), label = "Acidaminococcaceae", fontface = "bold", size = 2.5, color = "#0f3d0f") +
+  annotate(geom = "text", y= 0.05, x = as.Date("2018-10-10"), label = "Prevotellaceae", fontface = "bold", size = 2.5, 
+           color = "#228B22") +
+  annotate(geom = "text", y= 1.1, x = as.Date("2017-11-15"), label = "Predictor", fontface = "bold", size = 2.5, color =
+             "#0f3d0f") +
+  annotate(geom = "text", y= 0.05, x = as.Date("2017-11-15"), label = "Predicted", fontface = "bold", size = 2.5, color =
+             "#228B22")
+gc_w
+
+# To create Figure 11 
+# Combine first panel
+panel_1 <- plot_grid(dtw_d, gc_d, dtw_w, gc_w,
+          labels = c("A", "B", "C", "D"), 
+          label_x = .20,
+          label_y = .94,
+          align = "v",
+          nrow = 2, 
+          ncol = 2)
+
+# Create labels
+y.grob <- textGrob("Log relative abundance (%)", 
+                   gp=gpar(fontface="bold", fontsize=15), rot=90)
+
+x.grob <- textGrob("Seasons Sept 2017 - Jan 2019", 
+                   gp=gpar(fontface="bold", fontsize=15))
+
+
+tiff(file="season fig panel 1",
+width=20, height=14, units="cm", res=700)
+
+grid.arrange(arrangeGrob(panel_1, left = y.grob, bottom = x.grob))
+
+
+dev.off()
+
+# Create two plots for second panel
+# granger causality dry -> wet
+gcdw <-droplevels(subset(ps4,ps4$Taxa %in% c("Lachnospiraceae", "M2PB4-65 termite group"))) #0.03 - 0.01
+
+gc_dw <- ggplot(gcdw, aes(x=SampleDate, y=RelativeAbundance+0.001, color = Taxa,  linetype = Taxa)) +
+  scale_color_manual(values=c("#228B22", "#5c4424")) +
+  scale_linetype_manual(values = c("dashed", "solid")) +
+  scale_y_log10() +
+  scale_x_date(breaks = as.Date(c("2018-01-15", "2018-08-01", "2018-12-23")),
+               limits = as.Date(c("2017-9-01", "2019-01-31")), 
+               labels = c("Dry","Wet", "Dry")) +
+  coord_cartesian(ylim = c(0.005, 5.0))+
+     annotate("rect", xmin = as.Date("2017-10-01"), xmax = as.Date("2018-02-01"), ymin = 0.001, ymax = 5.0, 
+             alpha = .15, fill = "#D2B48C") +
+    annotate("rect", xmin = as.Date("2018-02-01"), xmax = as.Date("2018-06-01"), ymin = 0.001, ymax = 5.0, 
+           alpha = .15, fill = "#D2B48C") +
+    annotate("rect", xmin = as.Date("2018-10-01"), xmax = as.Date("2019-01-31"), ymin = 0.001, ymax = 5.0, 
+             alpha = .15, fill = "#D2B48C") +
+  annotate("rect", xmin = as.Date("2018-06-01"), xmax = as.Date("2018-10-01"), ymin = 0.001, ymax = 5.0, 
+           alpha = .15, fill = "#228B22") +
+  geom_smooth(method="gam",se=F) +
+    theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(), 
+        legend.position ="none") +
+  annotate(geom = "text", y= 0.65, x = as.Date("2018-10-05"), label = "M2PB4-65 termite group", fontface = "bold", size = 2.5, 
+           color = "#5c4424") +
+  annotate(geom = "text", y= 0.015, x = as.Date("2018-11-01"), label = "Lachnospiraceae", fontface = "bold", size = 2.5, 
+           color = "#228B22") +
+    annotate(geom = "text", y= 0.70, x = as.Date("2018-01-20"), label = "Predictor", fontface = "bold", size = 2.5, color =
+             "#5c4424") +
+  annotate(geom = "text", y= 0.015, x = as.Date("2018-02-05"), label = "Predicted", fontface = "bold", size = 2.5, color =
+             "#228B22")
+  
+gc_dw
+
+# granger causality wet -> dry
+gcwd <-droplevels(subset(ps4,ps4$Taxa %in% c("Bacteroidales UCG-001", "Muribaculaceae"))) #0.03 - 0.03
+
+gc_wd <- ggplot(gcwd, aes(x=SampleDate, y=RelativeAbundance+0.001, color = Taxa, linetype = Taxa)) +
+  scale_color_manual(values=c("#a57a41", "#0f3d0f")) +
+  scale_linetype_manual(values = c("dashed", "solid")) +
+  scale_y_log10() +
+  scale_x_date(breaks = as.Date(c("2018-01-15", "2018-08-01", "2018-12-23")),
+               limits = as.Date(c("2017-9-01", "2019-01-31")), 
+               labels = c("Dry","Wet", "Dry")) +
+     annotate("rect", xmin = as.Date("2017-10-01"), xmax = as.Date("2018-02-01"), ymin = 0.001, ymax = 5.0, 
+             alpha = .15, fill = "#D2B48C") +
+    annotate("rect", xmin = as.Date("2018-02-01"), xmax = as.Date("2018-06-01"), ymin = 0.001, ymax = 5.0, 
+           alpha = .15, fill = "#D2B48C") +
+    annotate("rect", xmin = as.Date("2018-10-01"), xmax = as.Date("2019-01-31"), ymin = 0.001, ymax = 5.0, 
+             alpha = .15, fill = "#D2B48C") +
+  annotate("rect", xmin = as.Date("2018-06-01"), xmax = as.Date("2018-10-01"), ymin = 0.001, ymax = 5.0, 
+           alpha = .15, fill = "#228B22") +
+  geom_smooth(method="gam",se=F) +
+    theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(), 
+        axis.ticks.y=element_blank(),
+        axis.text.y=element_blank(),
+        legend.position ="none") +
+  annotate(geom = "text", y= 0.80, x = as.Date("2018-11-10"), label = "Muribaculaceae", fontface = "bold", size = 2.5, 
+           color = "#0f3d0f") +
+  annotate(geom = "text", y= 0.009, x = as.Date("2018-10-25"), label = "Bacteroidales UCG-001", fontface = "bold", size = 2.5, 
+           color = "#a57a41") +
+  annotate(geom = "text", y= 0.70, x = as.Date("2018-01-20"), label = "Predictor", fontface = "bold", size = 2.5, color =
+             "#0f3d0f") +
+  annotate(geom = "text", y= 0.06, x = as.Date("2018-02-05"), label = "Predicted", fontface = "bold", size = 2.5, color =
+             "#a57a41")
+gc_wd
+
+# Combine second panel
+panel_2 <- plot_grid(gc_dw, gc_wd,
+          labels = c("E", "F"), 
+          label_x = .20,
+          label_y = .94,
+          align = "H",
+          nrow = 1, 
+          ncol = 2)
+
+
+tiff(file="season fig panel 2",
+width=20, height=7, units="cm", res=700)
+
+grid.arrange(arrangeGrob(panel_2, left = y.grob, bottom = x.grob))
+
+
+dev.off()
+
+# NOTE TO USER, figure was combined externally after this point 
+
+```
+
+Supplemental Information: qiime2R
+```{r qiime2R - heatmap}
+full_gelada_clean_family <- tax_glom(full_gelada_clean, taxrank="Family")
+full_gelada_clean_family_filtered = subset_taxa(full_gelada_clean_family, Family !="uncultured rumen bacterium"
+                                                & Family !="Unassigned Order" & Family !="uncultured Mollicutes bacterium"
+                                                & Family !="uncultured Clostridiaceae bacterium"
+                                                & Family !="uncultured bacterium"
+                                                & Family !="uncultured" & Family !="Unassigned"
+                                                & Family !="gut metagenome" & Family !="metagenome")
+
+
+OTU1 = as(otu_table(full_gelada_clean_family_filtered), "matrix")
+Otudef1 = as.data.frame(OTU1)
+if(taxa_are_rows(full_gelada_clean_family_filtered)){OTU <- t(OTU1)}
+
+taxonomy_family_clean <- as(tax_table(full_gelada_clean_family_filtered), "matrix")
+
+taxonomy_family_clean <- taxonomy_family_clean %>%
+  as.data.frame() %>%
+  rownames_to_column("Feature.ID")
+write.table(taxonomy_family_clean, "taxonomy_family_clean.txt")
+
+SVs<-apply(Otudef1, 2, function(x) x/sum(x)*100)
+
+SVsToPlot<-
+  data.frame(MeanAbundance=rowMeans(SVs)) %>% 
+  rownames_to_column("Feature.ID") %>%
+  arrange(desc(MeanAbundance)) %>%
+  top_n(100, MeanAbundance) %>%
+  pull(Feature.ID)
+write.table(SVsToPlot, "SVsToPlot1.txt")
+
+gelada_metadata <- sample_data(full_gelada_clean_family_filtered)
+gelada_metadata$sample <- rownames(gelada_metadata)
+
+SVs_plot <- SVs %>%
+  as.data.frame() %>%
+  rownames_to_column("Feature.ID") %>%
+  gather(-Feature.ID, key="sample", value="Abundance") %>%
+  mutate(Feature.ID=if_else(Feature.ID %in% SVsToPlot,Feature.ID,"Remainder")) %>%
+  group_by(sample, Feature.ID) %>%
+  summarize(Abundance=sum(Abundance)) %>%
+  left_join(gelada_metadata, by="sample") %>%
+  mutate(NormAbundance=log10(Abundance+0.02)) %>% 
+  left_join(taxonomy_family_clean) %>% #
+  #mutate(Feature=paste(Genus)) %>% 
+  mutate(Feature=paste(Family)) %>%
+  mutate(Feature=gsub("[kpcofgs]__", "", Feature)) %>%
+  drop_na()%>%
+  ggplot(aes(x=Season, y=Feature, fill=NormAbundance)) +
+  geom_tile() +
+  facet_grid( scales="free_x") + #~`Season`,
+  theme_q2r() +
+  theme(axis.text.x=element_text(angle=45, hjust=1)) +
+  theme(axis.text.y = element_text(size = 10))+
+  theme(axis.text.x = element_text(size = 12))+
+  theme(axis.title.x = element_text(size = 14))+
+  theme(axis.title.y = element_text(size = 14))+
+  theme(legend.key.size = unit(2,"line"))+
+  theme(legend.text = element_text(size=10))+
+  theme(legend.title = element_text(size=14))+
+  scale_fill_viridis_c(name="log10(% Abundance)")
+ggsave("FigureS1.tiff", units="in", width=8, height=6, dpi=300, compression = 'lzw')
+
+
+```
+
+Supplemental information - Figure S3
+```{r qiime longitudinal}
+
+# File names 
+#YOUR_METADATA  = #the metadata for your samples that have been processed in the Qiime2 pipeline 
+#YOUR_SHANNON  = #Shannon's alpha diversity metric for your samples that have been processed in the Qiime2 pipeline 
+# Code to run in qiime2 after removing comments
+#qiime longitudinal volatility \
+  #--m-metadata-file YOUR_METADATA.tsv \
+  #--m-metadata-file YOUR_SHANNON.qza \
+  #--p-default-metric shannon \
+  #--p-default-group-column delivery \
+  #--p-state-column month \
+  #--p-individual-id-column studyid \
+  #--o-visualization volatility.qzv
+```
+
