@@ -1,4 +1,0 @@
-List of files needed for analyses:
-- metadata file
-- ASV counts file, generated from dada2
-- ASV taxonomy file, generated from dada2
