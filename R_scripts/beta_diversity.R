@@ -12,3 +12,4 @@ Sex <- sample_data(full_gelada_clean_rel)$Sex
 # Keep individual as random effect to control for repeated measurements
 permanova2 <- adonis2(phyloseq::distance(full_gelada_clean, method="bray") ~ Age_Cat + AgeYear + Season + Rain30 + Sex, strata=sample_data(full_gelada_clean)$Individual_ID, na.action = na.omit)
 permanova2
+
